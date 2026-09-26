@@ -9,19 +9,21 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telethon import TelegramClient, errors
 
-# ================= 配置（从环境变量读） =================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-API_URL = "https://pc28.help/api/kj.json?nbr=1"
+# ========== 从环境变量读取，不再硬编码 ==========
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+# ===============================================
 
+API_URL = "https://pc28.help/api/kj.json?nbr=1"
 DEFAULT_DELAY = 5
 DEFAULT_PREFIX = "我带着希望"
+SESSION_PATH = "./sessions"
 
-# session 存到本地文件（持久化）
-SESSION_PATH = os.getenv("SESSION_PATH", "./sessions")
+# ========== session 操作全局锁 ==========
+session_lock = asyncio.Lock()
+client_instances = {}
 
-# ================= 算法 =================
 def get_combination(open_num):
     if open_num is None: return None
     if open_num in (1,3,5,7,9,11,13): return '小单'
@@ -56,11 +58,10 @@ def build_line(pred_num, pred_type, double_group, history, open_result=None):
         tail = f"🀄杀{open_result}"
     return f"{short_num}期杀{pred_type} {double_str}{tail}"
 
-# ================= API =================
 async def fetch_kj_data():
     try:
         req = urllib.request.Request(API_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data.get("data", [])
     except Exception as e:
@@ -77,10 +78,9 @@ def parse_api_record(item):
         return (num, a, b, c, open_num)
     except: return None
 
-# ================= 键盘 =================
 def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📱 登录账号", callback_data="login")],
+        [InlineKeyboardButton("📱 登录TG", callback_data="login")],
         [InlineKeyboardButton("👥 群组管理", callback_data="grouplist")],
         [InlineKeyboardButton("🔤 广告词", callback_data="prefixmenu")],
         [InlineKeyboardButton("⏱ 发送延迟", callback_data="delaymenu")],
@@ -89,65 +89,90 @@ def main_menu():
     ])
 
 def code_keyboard(code=""):
-    display = ""
-    for i in range(5):
-        display += code[i] if i < len(code) else "_"
-        if i < 4: display += " "
+    display = " ".join(code) if code else "　"
     kb = [
         [InlineKeyboardButton("1",callback_data="d1"),InlineKeyboardButton("2",callback_data="d2"),InlineKeyboardButton("3",callback_data="d3")],
         [InlineKeyboardButton("4",callback_data="d4"),InlineKeyboardButton("5",callback_data="d5"),InlineKeyboardButton("6",callback_data="d6")],
         [InlineKeyboardButton("7",callback_data="d7"),InlineKeyboardButton("8",callback_data="d8"),InlineKeyboardButton("9",callback_data="d9")],
-        [InlineKeyboardButton("🔄",callback_data="resend"),InlineKeyboardButton("0",callback_data="d0"),InlineKeyboardButton("⌫",callback_data="del")],
-        [InlineKeyboardButton("✅ 确认", callback_data="num_submit")],
-        [InlineKeyboardButton("🔙", callback_data="back")],
+        [InlineKeyboardButton("🔄重发",callback_data="resend"),InlineKeyboardButton("0",callback_data="d0"),InlineKeyboardButton("⌫删除",callback_data="del")],
+        [InlineKeyboardButton("✅ 确认提交", callback_data="num_submit")],
+        [InlineKeyboardButton("🔙 返回", callback_data="back")],
     ]
     return InlineKeyboardMarkup(kb), display
 
 def back_row():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back")]])
 
-# ================= 客户端 =================
 async def get_alive_client(uid, u):
+    global client_instances
     tg = u.setdefault("tg", {})
-    if tg.get("client") and tg["client"].is_connected():
-        return tg["client"]
 
-    os.makedirs(SESSION_PATH, exist_ok=True)
-    session_file = os.path.join(SESSION_PATH, str(uid))
-    client = TelegramClient(session_file, API_ID, API_HASH)
-    try:
-        await client.connect()
-    except Exception as e:
-        print(f"连接失败:{e}")
-        return None
+    existing = client_instances.get(uid)
+    if existing and existing.is_connected():
+        return existing
 
-    try:
-        if await client.is_user_authorized():
-            tg["client"] = client
-            u["logged_in"] = True
-            u["state"] = "logged_in"
+    async with session_lock:
+        existing = client_instances.get(uid)
+        if existing and existing.is_connected():
+            return existing
+
+        os.makedirs(SESSION_PATH, exist_ok=True)
+        session_file = os.path.join(SESSION_PATH, str(uid))
+
+        if existing:
+            try:
+                await existing.disconnect()
+            except:
+                pass
+
+        client = TelegramClient(session_file, API_ID, API_HASH)
+        try:
+            await asyncio.wait_for(client.connect(), timeout=20)
+        except asyncio.TimeoutError:
+            print("连接超时")
+            return None
+        except Exception as e:
+            print(f"连接失败:{e}")
+            return None
+
+        try:
+            if await client.is_user_authorized():
+                client_instances[uid] = client
+                tg["client"] = client
+                u["logged_in"] = True
+                u["state"] = "logged_in"
+                return client
+        except Exception:
+            pass
+
+        phone = tg.get("phone")
+        if not phone:
             return client
-    except Exception:
-        pass
 
-    phone = tg.get("phone")
-    if not phone:
-        return None
-    try:
-        if not tg.get("phone_code_hash"):
-            sent = await client.send_code_request(phone)
-            tg["phone_code_hash"] = sent.phone_code_hash
-            tg["time"] = time.time()
-        tg["client"] = client
-        return client
-    except errors.AuthRestartError:
-        await client.disconnect()
-        return None
-    except Exception as e:
-        print(f"发码失败:{e}")
-        return None
+        try:
+            if not tg.get("phone_code_hash"):
+                sent = await client.send_code_request(phone)
+                tg["phone_code_hash"] = sent.phone_code_hash
+                tg["time"] = time.time()
+            client_instances[uid] = client
+            tg["client"] = client
+            return client
+        except errors.AuthRestartError:
+            try:
+                await client.disconnect()
+            except:
+                pass
+            if os.path.exists(session_file):
+                os.remove(session_file)
+                for ext in ['-journal', '-wal', '-shm']:
+                    jf = session_file + ext
+                    if os.path.exists(jf):
+                        os.remove(jf)
+            return None
+        except Exception as e:
+            print(f"发码失败:{e}")
+            return None
 
-# ================= 登录 =================
 async def do_sign_in(update, context, query):
     u = context.user_data
     tg = u.get("tg", {})
@@ -155,16 +180,14 @@ async def do_sign_in(update, context, query):
     phone = tg.get("phone", "")
     code = tg.get("code", "")
     phone_code_hash = tg.get("phone_code_hash", "")
-
     if not client:
-        kb,_ = code_keyboard("")
+        kb, _ = code_keyboard("")
         await query.edit_message_text("❌ 客户端丢失，重/login", reply_markup=kb)
         return
     if not phone or not code or not phone_code_hash:
-        kb,_ = code_keyboard("")
+        kb, _ = code_keyboard("")
         await query.edit_message_text("❌ 数据丢失，重新登录", reply_markup=kb)
         return
-
     try:
         await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
         me = await client.get_me()
@@ -184,18 +207,17 @@ async def do_sign_in(update, context, query):
             await query.edit_message_text("🔐 两步验证已开启\n\n请在聊天框直接发送你的登录密码：", reply_markup=back_row())
         elif "PHONE_CODE_INVALID" in err:
             tg["code"] = ""
-            kb,_ = code_keyboard("")
-            await query.edit_message_text("❌ 验证码错误，重新输入\n\n输入：_ _ _ _ _", reply_markup=kb)
+            kb, _ = code_keyboard("")
+            await query.edit_message_text("❌ 验证码错误，请重新输入", reply_markup=kb)
         elif "PHONE_CODE_EXPIRED" in err:
             tg["code"] = ""
-            kb,_ = code_keyboard("")
-            await query.edit_message_text("⚠️ 过期，点🔄重发", reply_markup=kb)
+            kb, _ = code_keyboard("")
+            await query.edit_message_text("⚠️ 已过期，点🔄重发", reply_markup=kb)
         else:
             tg["code"] = ""
-            kb,_ = code_keyboard("")
-            await query.edit_message_text(f"❌ {err}\n\n重新输入", reply_markup=kb)
+            kb, _ = code_keyboard("")
+            await query.edit_message_text(f"❌ {err}\n\n请重新输入", reply_markup=kb)
 
-# ================= 群组列表 =================
 async def show_group_list(query, u):
     groups = u.get("target_groups", [])
     if not groups:
@@ -208,7 +230,6 @@ async def show_group_list(query, u):
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back")])
     await query.edit_message_text(f"共 {len(groups)} 个群，点❌删除：", reply_markup=InlineKeyboardMarkup(kb))
 
-# ================= 前缀管理 =================
 async def show_prefix_menu(query, u):
     prefixes = u.get("prefixes", [])
     current = u.get("current_prefix", "")
@@ -223,7 +244,6 @@ async def show_prefix_menu(query, u):
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
-# ================= 延迟管理 =================
 async def show_delay_menu(query, u):
     delay = u.get("delay", DEFAULT_DELAY)
     text = f"⏱ 发送延迟设置\n\n当前：开奖后延迟 <b>{delay}</b> 秒发送\n\n点快捷设置或发一个数字自定义："
@@ -235,53 +255,41 @@ async def show_delay_menu(query, u):
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-# ================= 报数循环 =================
 async def run_reporter(uid, context):
     u = context.user_data
     tg = u.get("tg", {})
     groups = u.get("target_groups", [])
     prefixes = u.get("prefixes", [])
-
     history = []
     results = []
     processed_nums = set()
     current_prefix = ""
-
     try:
         while True:
             try:
                 task = u.get("reporter_task")
                 if not task or task.done(): break
-
                 delay = u.get("delay", DEFAULT_DELAY)
-
                 records = await fetch_kj_data()
                 if not records:
                     await asyncio.sleep(10)
                     continue
-
                 if delay > 0:
                     await asyncio.sleep(delay)
-
                 records = sorted(records, key=lambda x: int(x["nbr"]))
-
                 for item in records:
                     p = parse_api_record(item)
                     if not p: continue
-
                     num = p[0]
                     if num in processed_nums: continue
                     processed_nums.add(num)
                     if len(processed_nums) > 50:
                         processed_nums = set(list(processed_nums)[-30:])
-
                     if history:
                         last = history[-1]
                         if last[0] == p[0] and last[4] == p[4]: continue
-
                     history.append(p)
                     if len(history) > 30: history = history[-30:]
-
                     should_clear = False
                     latest_open = p[4]
                     if latest_open is not None:
@@ -291,13 +299,11 @@ async def run_reporter(uid, context):
                                 if combo == pt:
                                     should_clear = True
                                 break
-
                     client = await get_alive_client(uid, u)
                     if not client:
                         await asyncio.sleep(10)
                         continue
                     tg["client"] = client
-
                     if should_clear or not current_prefix:
                         if u.get("current_prefix"):
                             current_prefix = u["current_prefix"]
@@ -305,7 +311,6 @@ async def run_reporter(uid, context):
                             current_prefix = random.choice(prefixes)
                         else:
                             current_prefix = DEFAULT_PREFIX
-
                     if should_clear:
                         results = []
                         pred_num = p[0] + 1
@@ -329,7 +334,6 @@ async def run_reporter(uid, context):
                                     break
                             if opened is None: continue
                             batch_lines.append(build_line(pn, pt, dg, history, opened))
-
                         pred_num = p[0] + 1
                         res = predict(history)
                         if res is None:
@@ -338,13 +342,12 @@ async def run_reporter(uid, context):
                         pred_type, double_group = res
                         results.append((pred_num, pred_type, double_group))
                         batch_lines.append(build_line(pred_num, pred_type, double_group, history))
-
                         if batch_lines and groups:
                             full_msg = f"{current_prefix}\n" + "\n".join(batch_lines)
                             for g in groups:
                                 try: await client.send_message(g, full_msg)
                                 except Exception as e:
-                                    print(f"发送炸了:{e}，重连重试...")
+                                    print(f"发送炸了:{e}")
                                     try: await client.disconnect()
                                     except: pass
                                     client = await get_alive_client(uid, u)
@@ -352,9 +355,7 @@ async def run_reporter(uid, context):
                                         tg["client"] = client
                                         try: await client.send_message(g, full_msg)
                                         except Exception as e2: print(f"重试也失败:{e2}")
-
                 await asyncio.sleep(10)
-
             except asyncio.CancelledError: break
             except Exception as e:
                 print("循环错:", e)
@@ -363,7 +364,6 @@ async def run_reporter(uid, context):
     finally:
         u["reporter_task"] = None
 
-# ================= /start =================
 async def start(update, context):
     uid = update.effective_user.id
     u = context.user_data
@@ -373,19 +373,16 @@ async def start(update, context):
     u.setdefault("prefixes", [])
     u.setdefault("current_prefix", "")
     u.setdefault("delay", DEFAULT_DELAY)
-
     client = await get_alive_client(uid, u)
     if client and u.get("logged_in"):
         await update.message.reply_text("✅ 已登录，直接操作", reply_markup=main_menu())
     else:
-        await update.message.reply_text("测试公益阶段", reply_markup=main_menu())
+        await update.message.reply_text("测试公益", reply_markup=main_menu())
 
-# ================= 文字 =================
 async def on_message(update, context):
     txt = update.message.text.strip()
     u = context.user_data
     state = u.get("state", "init")
-
     if state == "set_delay":
         try:
             sec = int(txt)
@@ -398,7 +395,6 @@ async def on_message(update, context):
         except ValueError:
             await update.message.reply_text("❌ 请输入数字（秒）", reply_markup=back_row())
         return
-
     if state == "wait_password":
         u["tg"]["password_input"] = txt
         u["tg"]["code"] = txt
@@ -418,7 +414,6 @@ async def on_message(update, context):
         else:
             await update.message.reply_text("❌ 客户端丢失", reply_markup=main_menu())
         return
-
     if state == "wait_code":
         u["tg"]["code"] = txt
         await update.message.reply_text("⏳ 验证中...")
@@ -428,7 +423,6 @@ async def on_message(update, context):
             async def answer(self): pass
         await do_sign_in(update, context, FakeQuery())
         return
-
     if state == "wait_phone":
         if not txt.startswith("+"):
             await update.message.reply_text("❌ 带+国家码")
@@ -439,13 +433,12 @@ async def on_message(update, context):
         client = await get_alive_client(update.effective_user.id, u)
         if client:
             u["state"] = "wait_code"
-            kb,_ = code_keyboard("")
-            await update.message.reply_text("📲 已发验证码\n\n输入：_ _ _ _ _", reply_markup=kb)
+            kb, _ = code_keyboard("")
+            await update.message.reply_text("📲 请输入验证码：\n\n　", reply_markup=kb)
         else:
             await update.message.reply_text("❌ 发码失败，重试", reply_markup=main_menu())
             u["state"] = "init"
         return
-
     if state == "pf_add":
         prefixes = u.get("prefixes", [])
         prefixes.append(txt)
@@ -453,7 +446,6 @@ async def on_message(update, context):
         u["state"] = "logged_in"
         await update.message.reply_text(f"✅ 已添加前缀:\n{txt}", reply_markup=main_menu())
         return
-
     if u.get("logged_in"):
         if txt in ["开播", "停播"] or txt.startswith("/"):
             pass
@@ -465,16 +457,18 @@ async def on_message(update, context):
                     await update.message.reply_text("❌ 客户端异常，重/login", reply_markup=main_menu())
                     return
                 ent = await client.get_entity(txt)
-                u["target_groups"].append(ent)
-                name = getattr(ent, 'title', getattr(ent, 'username', str(ent.id)))
-                await update.message.reply_text(f"✅ 已绑群: {name}\n可点【开启】", reply_markup=main_menu())
+                gid = ent.id
+                if any(g.id == gid for g in u["target_groups"]):
+                    await update.message.reply_text("⚠️ 这个群已经绑过了", reply_markup=main_menu())
+                else:
+                    u["target_groups"].append(ent)
+                    name = getattr(ent, 'title', getattr(ent, 'username', str(gid)))
+                    await update.message.reply_text(f"✅ 已绑群：{name}\n当前共 {len(u['target_groups'])} 个群", reply_markup=main_menu())
             except Exception as e:
                 await update.message.reply_text(f"❌ 解析失败:{e}\n\n发群ID或 t.me/链接", reply_markup=main_menu())
             return
-
     await update.message.reply_text("请 /start", reply_markup=main_menu())
 
-# ================= 回调 =================
 async def on_callback(update, context):
     query = update.callback_query
     await query.answer()
@@ -490,11 +484,9 @@ async def on_callback(update, context):
 
     if data == "login":
         u["state"] = "wait_phone"
-        await query.edit_message_text("发手机号(如+86)：", reply_markup=back_row())
-
+        await query.edit_message_text("发TG账号：", reply_markup=back_row())
     elif data == "grouplist":
         await show_group_list(query, u)
-
     elif data.startswith("delg_"):
         idx = int(data.split("_")[1])
         groups = u.get("target_groups", [])
@@ -505,10 +497,8 @@ async def on_callback(update, context):
             await show_group_list(query, u)
         else:
             await query.edit_message_text("❌ 索引错误", reply_markup=back_row())
-
     elif data == "prefixmenu":
         await show_prefix_menu(query, u)
-
     elif data.startswith("pf_set_"):
         idx = int(data.split("_")[2])
         prefixes = u.get("prefixes", [])
@@ -516,30 +506,24 @@ async def on_callback(update, context):
             u["current_prefix"] = prefixes[idx]
             await query.answer(f"已设为：{prefixes[idx]}")
             await show_prefix_menu(query, u)
-
     elif data == "pf_random":
         u["current_prefix"] = ""
         await query.answer("已切换为随机模式")
         await show_prefix_menu(query, u)
-
     elif data == "pf_add":
         u["state"] = "pf_add"
         await query.edit_message_text("请在聊天框发送新前缀：", reply_markup=back_row())
-
     elif data == "pf_clear":
         u["prefixes"] = []
         u["current_prefix"] = ""
         await show_prefix_menu(query, u)
-
     elif data == "delaymenu":
         await show_delay_menu(query, u)
-
     elif data.startswith("delay_"):
         sec = int(data.split("_")[1])
         u["delay"] = sec
         await query.answer(f"已设置 {sec} 秒")
         await show_delay_menu(query, u)
-
     elif data == "start_rep":
         if not u.get("logged_in"):
             await query.edit_message_text("❌ 先登录", reply_markup=back_row())
@@ -552,24 +536,20 @@ async def on_callback(update, context):
             return
         u["reporter_task"] = asyncio.create_task(run_reporter(uid, context))
         await query.edit_message_text(f"✅ 已启动（延迟 {u.get('delay', DEFAULT_DELAY)}秒）", reply_markup=back_row())
-
     elif data == "stop_rep":
         if u.get("reporter_task"):
             u["reporter_task"].cancel()
             u["reporter_task"] = None
         await query.edit_message_text("⏹ 已停", reply_markup=back_row())
-
     elif data == "status":
         logged = u.get("logged_in", False)
         groups = len(u.get("target_groups", []))
         running = bool(u.get("reporter_task") and not u["reporter_task"].done())
         text = f"📊 状态\n\n登录：{'✅' if logged else '❌'}\n群：{groups}个\n延迟：{u.get('delay', DEFAULT_DELAY)}秒\n报数：{'🟢' if running else '⭕'}"
         await query.edit_message_text(text, reply_markup=back_row())
-
     elif data == "back":
         u["state"] = "logged_in" if u.get("logged_in") else "init"
         await query.edit_message_text("菜单", reply_markup=main_menu())
-
     elif data == "resend":
         try:
             client = await get_alive_client(uid, u)
@@ -584,34 +564,35 @@ async def on_callback(update, context):
             tg["phone_code_hash"] = sent.phone_code_hash
             tg["time"] = time.time()
             tg["code"] = ""
-            kb,_ = code_keyboard("")
-            await query.edit_message_text("🔄 已重发\n\n输入：_ _ _ _ _", reply_markup=kb)
+            kb, _ = code_keyboard("")
+            await query.edit_message_text("🔄 已重发\n📲 请输入验证码：\n\n　", reply_markup=kb)
+        except errors.AuthRestartError:
+            await query.edit_message_text("⚠️ 需要重新登录，点【登录TG】", reply_markup=main_menu())
         except Exception as e:
             await query.edit_message_text(f"失败:{e}", reply_markup=back_row())
-
     elif data == "num_submit":
-        code = tg.get("code","")
-        if len(code) != 5:
-            kb,_ = code_keyboard(code)
-            await query.edit_message_text(f"需5位\n\n输入：{code or '_ _ _ _ _'}", reply_markup=kb)
+        code = tg.get("code", "")
+        if not code:
+            kb, _ = code_keyboard("")
+            await query.edit_message_text("📲 请输入验证码：\n\n　", reply_markup=kb)
             return
-        await query.edit_message_text("⏳ 验证...")
+        await query.edit_message_text("⏳ 正在验证...")
         await do_sign_in(update, context, query)
-
     elif data == "del":
-        tg["code"] = tg.get("code","")[:-1]
-        kb,_ = code_keyboard(tg["code"])
-        await query.edit_message_text(f"输入：{tg['code'] or '_ _ _ _ _'}", reply_markup=kb)
-
+        tg["code"] = tg.get("code", "")[:-1]
+        kb, display = code_keyboard(tg["code"])
+        await query.edit_message_text(f"📲 请输入验证码：\n\n{display}", reply_markup=kb)
     elif data.startswith("d"):
         n = data[1:]
-        cur = tg.get("code","")
-        if len(cur) < 5:
-            tg["code"] = cur + n
-        kb,_ = code_keyboard(tg["code"])
-        await query.edit_message_text(f"输入：{tg['code'] or '_ _ _ _ _'}", reply_markup=kb)
+        cur = tg.get("code", "")
+        tg["code"] = cur + n
+        kb, display = code_keyboard(tg["code"])
+        await query.edit_message_text(f"📲 请输入验证码：\n\n{display}", reply_markup=kb)
 
-# ================= 启动 =================
+if not BOT_TOKEN or not API_ID or not API_HASH:
+    print("❌ 请设置环境变量 BOT_TOKEN / API_ID / API_HASH")
+    exit(1)
+
 app = Application.builder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(on_callback))
