@@ -598,7 +598,7 @@ async def on_callback(update, context):
 
     if data == "login":
         u["state"] = "wait_phone"
-        await query.edit_message_text("发手机号(+86开头)：", reply_markup=back_row())
+        await query.edit_message_text("发TG账号：", reply_markup=back_row())
     elif data == "grouplist":
         await show_group_list(query, u)
     elif data.startswith("delg_"):
