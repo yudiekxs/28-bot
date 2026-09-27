@@ -10,13 +10,10 @@ import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telethon import TelegramClient, errors
-from dotenv import load_dotenv
 
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = int(os.getenv("API_ID", 0))
-API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
 API_URL = "https://pc28.help/api/kj.json?nbr=1"
 
 DEFAULT_DELAY = 5
@@ -29,7 +26,7 @@ client_instances = {}
 # ========== 算法定义 ==========
 ALGORITHMS = {
     "1": {"name": "算法一（原版）"},
-    "2": {"name": "算法二（3Y）"},
+    "2": {"name": "算法二（3Y同组均值+1）"},
     "3": {"name": "算法三（时间π）"},
 }
 DEFAULT_ALGO = "1"
@@ -201,7 +198,7 @@ def algo_menu(u):
 
 def main_menu(u):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("登录账号", callback_data="login")],
+        [InlineKeyboardButton("添加账号", callback_data="login")],
         [InlineKeyboardButton("添加群组", callback_data="grouplist")],
         [InlineKeyboardButton("修改广告词", callback_data="prefixmenu")],
         [InlineKeyboardButton("⏱ 发送延迟", callback_data="delaymenu")],
@@ -352,8 +349,8 @@ async def show_prefix_menu(query, u):
     for i, p in enumerate(prefixes):
         mark = " ✅" if p == current else ""
         kb.append([InlineKeyboardButton(f"{p}{mark}", callback_data=f"pf_set_{i}")])
-    kb.append([InlineKeyboardButton("🎲 随机广告词", callback_data="pf_random")])
-    kb.append([InlineKeyboardButton("➕ 添加广告词", callback_data="pf_add")])
+    kb.append([InlineKeyboardButton("🎲 随机模式", callback_data="pf_random")])
+    kb.append([InlineKeyboardButton("➕ 添加前缀", callback_data="pf_add")])
     kb.append([InlineKeyboardButton("🗑 清空所有", callback_data="pf_clear")])
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
@@ -601,7 +598,7 @@ async def on_callback(update, context):
 
     if data == "login":
         u["state"] = "wait_phone"
-        await query.edit_message_text("发TG账号)：", reply_markup=back_row())
+        await query.edit_message_text("发手机号(+86开头)：", reply_markup=back_row())
     elif data == "grouplist":
         await show_group_list(query, u)
     elif data.startswith("delg_"):
