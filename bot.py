@@ -20,6 +20,9 @@ DEFAULT_DELAY = 5
 DEFAULT_PREFIX = "我带着希望"
 SESSION_PATH = "./sessions"
 
+# ========== 连中目标配置 ==========
+DEFAULT_STREAK_GOAL = 50   # 默认连中 50 把达成目标
+
 session_lock = asyncio.Lock()
 client_instances = {}
 
@@ -196,15 +199,30 @@ def algo_menu(u):
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back")])
     return InlineKeyboardMarkup(kb)
 
+# ========== 连中目标菜单 ==========
+def streak_menu(u):
+    goal = u.get("streak_goal", DEFAULT_STREAK_GOAL)
+    streak = u.get("streak", 0)
+    kb = [
+        [InlineKeyboardButton("🎯 1 把", callback_data="streak_set_1")],
+        [InlineKeyboardButton("🎯 3 把", callback_data="streak_set_3")],
+        [InlineKeyboardButton("🎯 5 把", callback_data="streak_set_5")],
+        [InlineKeyboardButton("🎯 10 把", callback_data="streak_set_10")],
+        [InlineKeyboardButton("✏️ 自定义", callback_data="streak_custom")],
+        [InlineKeyboardButton("🔙 返回", callback_data="back")],
+    ]
+    return InlineKeyboardMarkup(kb)
+
 def main_menu(u):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("添加账号", callback_data="login")],
         [InlineKeyboardButton("添加群组", callback_data="grouplist")],
-        [InlineKeyboardButton("修改广告词", callback_data="prefixmenu")],
+        [InlineKeyboardButton("广告词修改", callback_data="prefixmenu")],
         [InlineKeyboardButton("⏱ 发送延迟", callback_data="delaymenu")],
         [InlineKeyboardButton("切换算法", callback_data="algo_menu")],
-        [InlineKeyboardButton("开启", callback_data="start_rep"), InlineKeyboardButton("停", callback_data="stop_rep")],
-        [InlineKeyboardButton("📊 状态", callback_data="status")],
+        [InlineKeyboardButton("连中目标", callback_data="streakmenu")],   # 新增
+        [InlineKeyboardButton("开启", callback_data="start_rep"), InlineKeyboardButton("⏹ 停", callback_data="stop_rep")],
+        [InlineKeyboardButton("状态", callback_data="status")],
     ])
 
 def code_keyboard(code=""):
@@ -402,8 +420,43 @@ async def run_reporter(uid, context):
                         if last[0] == p[0] and last[4] == p[4]: continue
                     history.append(p)
                     if len(history) > 30: history = history[-30:]
-                    should_clear = False
+
+                    # ========== 连中判定 ==========
                     latest_open = p[4]
+                    goal = u.get("streak_goal", DEFAULT_STREAK_GOAL)
+                    streak = u.get("streak", 0)
+                    hit = False
+                    if latest_open is not None:
+                        combo = get_combination(latest_open)
+                        # 遍历本期预测，只要有一个组合的"杀号"不等于实际组合就算命中
+                        for (pn, pt, dg) in list(results):
+                            if pn == p[0]:
+                                if combo == pt:
+                                    hit = False   # 杀号中了 = 没命中
+                                else:
+                                    hit = True    # 杀号没中 = 命中
+                                break
+                    if hit:
+                        streak += 1
+                        u["streak"] = streak
+                        if streak >= goal:
+                            # 达标，群发提醒
+                            client = tg.get("client")
+                            if client and groups:
+                                try:
+                                    for g in groups:
+                                        await client.send_message(
+                                            g,
+                                            f"🎯已达成连中目标 {goal} 把！\n当前连中：{streak} 把"
+                                        )
+                                except Exception as e:
+                                    print(f"连中提醒发送失败:{e}")
+                            u["streak"] = 0   # 达成后归零，重新开始
+                    else:
+                        u["streak"] = 0
+                    # ==============================
+
+                    should_clear = False
                     if latest_open is not None:
                         for (pn, pt, dg) in list(results):
                             if pn == p[0]:
@@ -486,11 +539,13 @@ async def start(update, context):
     u.setdefault("current_prefix", "")
     u.setdefault("delay", DEFAULT_DELAY)
     u.setdefault("current_algo", DEFAULT_ALGO)
+    u.setdefault("streak", 0)                    # 新增
+    u.setdefault("streak_goal", DEFAULT_STREAK_GOAL)  # 新增
     client = await get_alive_client(uid, u)
     if client and u.get("logged_in"):
         await update.message.reply_text("✅ 已登录，直接操作", reply_markup=main_menu(u))
     else:
-        await update.message.reply_text("测试公益中", reply_markup=main_menu(u))
+        await update.message.reply_text("测试公益中 如想用你自己的算法 可发我后续加进去", reply_markup=main_menu(u))
 
 async def on_message(update, context):
     txt = update.message.text.strip()
@@ -507,6 +562,19 @@ async def on_message(update, context):
                 await update.message.reply_text(f"✅ 已设置延迟 {sec} 秒", reply_markup=main_menu(u))
         except ValueError:
             await update.message.reply_text("❌ 请输入数字（秒）", reply_markup=back_row())
+        return
+    if state == "streak_custom":   # 新增：自定义连中目标
+        try:
+            goal = int(txt)
+            if goal < 1:
+                await update.message.reply_text("❌ 至少 1 把", reply_markup=streak_menu(u))
+            else:
+                u["streak_goal"] = goal
+                u["streak"] = 0
+                u["state"] = "logged_in"
+                await update.message.reply_text(f"✅ 连中目标已设为 {goal} 把", reply_markup=main_menu(u))
+        except ValueError:
+            await update.message.reply_text("❌ 请输入数字", reply_markup=back_row())
         return
     if state == "wait_password":
         u["tg"]["password_input"] = txt
@@ -594,6 +662,8 @@ async def on_callback(update, context):
     u.setdefault("target_groups", [])
     u.setdefault("delay", DEFAULT_DELAY)
     u.setdefault("current_algo", DEFAULT_ALGO)
+    u.setdefault("streak", 0)                    # 新增
+    u.setdefault("streak_goal", DEFAULT_STREAK_GOAL)  # 新增
     tg = u["tg"]
 
     if data == "login":
@@ -638,6 +708,27 @@ async def on_callback(update, context):
         u["delay"] = sec
         await query.answer(f"已设置 {sec} 秒")
         await show_delay_menu(query, u)
+    # ========== 连中目标 ==========
+    elif data == "streakmenu":
+        goal = u.get("streak_goal", DEFAULT_STREAK_GOAL)
+        streak = u.get("streak", 0)
+        await query.edit_message_text(
+            f"🎯 连中目标\n\n当前目标：{goal} 把\n当前连中：{streak} 把\n\n点下面设置目标：",
+            reply_markup=streak_menu(u)
+        )
+    elif data.startswith("streak_set_"):
+        goal = int(data.split("_")[2])
+        u["streak_goal"] = goal
+        u["streak"] = 0
+        await query.answer(f"✅ 已设为 {goal} 把")
+        await query.edit_message_text(
+            f"✅ 连中目标已设为 {goal} 把\n\n达成后会在所有群发提醒",
+            reply_markup=streak_menu(u)
+        )
+    elif data == "streak_custom":
+        u["state"] = "streak_custom"
+        await query.edit_message_text("请在聊天框发送一个数字（连中多少把算达成）：", reply_markup=back_row())
+    # ============================
     elif data == "algo_menu":
         current = u.get("current_algo", DEFAULT_ALGO)
         name = ALGORITHMS.get(current, ALGORITHMS[DEFAULT_ALGO])["name"]
@@ -649,21 +740,21 @@ async def on_callback(update, context):
         u["current_algo"] = "1"
         await query.answer("✅ 已切换到 算法一")
         await query.edit_message_text(
-            f"✅ 已切换到：算法一（原版）\n\n开播后将用此算法预测",
+            f"✅ 已切换到：算法一（原版）\n\n开启后将用此算法预测",
             reply_markup=algo_menu(u)
         )
     elif data == "algo_set_2":
         u["current_algo"] = "2"
         await query.answer("✅ 已切换到 算法二")
         await query.edit_message_text(
-            f"✅ 已切换到：算法二（3Y同组均值+1）\n\n开播后将用此算法预测",
+            f"✅ 已切换到：算法二（3Y同组均值+1）\n\n开启后将用此算法预测",
             reply_markup=algo_menu(u)
         )
     elif data == "algo_set_3":
         u["current_algo"] = "3"
         await query.answer("✅ 已切换到 算法三")
         await query.edit_message_text(
-            f"✅ 已切换到：算法三（时间π）\n\n开播后将用此算法预测",
+            f"✅ 已切换到：算法三（时间π）\n\n开启后将用此算法预测",
             reply_markup=algo_menu(u)
         )
     elif data == "start_rep":
@@ -689,7 +780,11 @@ async def on_callback(update, context):
         groups = len(u.get("target_groups", []))
         running = bool(u.get("reporter_task") and not u["reporter_task"].done())
         algo_name = ALGORITHMS[u.get("current_algo", DEFAULT_ALGO)]["name"]
-        text = f"📊 状态\n\n登录：{'✅' if logged else '❌'}\n群：{groups}个\n延迟：{u.get('delay', DEFAULT_DELAY)}秒\n算法：{algo_name}\n报数：{'🟢' if running else '⭕'}"
+        streak = u.get("streak", 0)
+        goal = u.get("streak_goal", DEFAULT_STREAK_GOAL)
+        text = (f"📊 状态\n\n登录：{'✅' if logged else '❌'}\n群：{groups}个\n"
+                f"延迟：{u.get('delay', DEFAULT_DELAY)}秒\n算法：{algo_name}\n"
+                f"🎯 连中：{streak}/{goal} 把\n报数：{'🟢' if running else '⭕'}")
         await query.edit_message_text(text, reply_markup=back_row())
     elif data == "back":
         u["state"] = "logged_in" if u.get("logged_in") else "init"
@@ -711,7 +806,7 @@ async def on_callback(update, context):
             kb, _ = code_keyboard("")
             await query.edit_message_text("🔄 已重发\n📲 请输入验证码：\n\n　", reply_markup=kb)
         except errors.AuthRestartError:
-            await query.edit_message_text("⚠️ 需要重新登录，点【登录TG】", reply_markup=main_menu(u))
+            await query.edit_message_text("⚠️ 需要重新登录，点【添加账号】", reply_markup=main_menu(u))
         except Exception as e:
             await query.edit_message_text(f"失败:{e}", reply_markup=back_row())
     elif data == "num_submit":
