@@ -490,7 +490,7 @@ async def start(update, context):
     if client and u.get("logged_in"):
         await update.message.reply_text("✅ 已登录，直接操作", reply_markup=main_menu(u))
     else:
-        await update.message.reply_text("点【登录TG】开始", reply_markup=main_menu(u))
+        await update.message.reply_text("测试公益中", reply_markup=main_menu(u))
 
 async def on_message(update, context):
     txt = update.message.text.strip()
