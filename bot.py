@@ -9,21 +9,27 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telethon import TelegramClient, errors
 
-# ========== 从环境变量读取，不再硬编码 ==========
+# ========== 从环境变量读取（安全） ==========
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
-# ===============================================
-
 API_URL = "https://pc28.help/api/kj.json?nbr=1"
+
 DEFAULT_DELAY = 5
-DEFAULT_PREFIX = "我带着希望"
+DEFAULT_PREFIX = "带着希望"
 SESSION_PATH = "./sessions"
 
-# ========== session 操作全局锁 ==========
 session_lock = asyncio.Lock()
 client_instances = {}
 
+# ========== 算法定义 ==========
+ALGORITHMS = {
+    "1": {"name": "算法一（原版）"},
+    "2": {"name": "算法二（3Y）"},
+}
+DEFAULT_ALGO = "1"
+
+# ========== 组合判定 ==========
 def get_combination(open_num):
     if open_num is None: return None
     if open_num in (1,3,5,7,9,11,13): return '小单'
@@ -32,7 +38,15 @@ def get_combination(open_num):
     elif open_num in (15,17,19,21,23,25,27): return '大单'
     return '小单'
 
-def predict(history):
+def opposite_combo(combo):
+    opp = {
+        '大单': '小双', '小双': '大单',
+        '大双': '小单', '小单': '大双',
+    }
+    return opp.get(combo, '小双')
+
+# ========== 算法一：原版 ==========
+def predict_v1(history):
     if not history: return None
     latest = history[-1]
     a, c, open_num = latest[1], latest[3], latest[4]
@@ -43,6 +57,55 @@ def predict(history):
     elif val in (14,16,18,20,22,24,26): return '小单', ['小双', '大单']
     elif val in (15,17,19,21,23,25,27): return '小双', ['小单', '大双']
     return '大双', ['小双', '大双']
+
+# ========== 算法二：3Y 同组均值 + 1 ==========
+def predict_v2(history):
+    if not history:
+        return '大双', ['小双', '大单']
+    latest = history[-1]
+    a, b, c, open_num = latest[1], latest[2], latest[3], latest[4]
+
+    s = a + b + c
+    group = (c + 3) % 3
+
+    same_group = []
+    for rec in reversed(history):
+        rec_sum = rec[1] + rec[2] + rec[3]
+        if rec_sum % 3 == group:
+            same_group.append(rec_sum)
+        if len(same_group) >= 3:
+            break
+
+    if not same_group:
+        avg = s
+    else:
+        avg = sum(same_group) / len(same_group)
+
+    result = round(avg + 1)
+    result = max(0, min(27, result))
+
+    big = result >= 14
+    odd = result % 2 == 1
+    if big and odd:    combo = '大单'
+    elif big and not odd: combo = '大双'
+    elif not big and odd: combo = '小单'
+    else:              combo = '小双'
+
+    kill = opposite_combo(combo)
+    if combo in ('大单', '大双'):
+        group_kill = ['小单', '小双']
+    else:
+        group_kill = ['大单', '大双']
+
+    return combo, group_kill
+
+# ========== 统一入口 ==========
+def predict(history, algo_key=None):
+    if algo_key is None:
+        algo_key = DEFAULT_ALGO
+    if algo_key == "2":
+        return predict_v2(history)
+    return predict_v1(history)
 
 def build_line(pred_num, pred_type, double_group, history, open_result=None):
     short_num = str(pred_num)[-2:]
@@ -78,12 +141,23 @@ def parse_api_record(item):
         return (num, a, b, c, open_num)
     except: return None
 
-def main_menu():
+# ========== 算法菜单 ==========
+def algo_menu(u):
+    current = u.get("current_algo", DEFAULT_ALGO)
+    kb = []
+    for key, algo in ALGORITHMS.items():
+        mark = " ✅" if key == current else ""
+        kb.append([InlineKeyboardButton(f"{algo['name']}{mark}", callback_data=f"algo_set_{key}")])
+    kb.append([InlineKeyboardButton("🔙 返回", callback_data="back")])
+    return InlineKeyboardMarkup(kb)
+
+def main_menu(u):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📱 登录TG", callback_data="login")],
-        [InlineKeyboardButton("👥 群组管理", callback_data="grouplist")],
-        [InlineKeyboardButton("🔤 广告词", callback_data="prefixmenu")],
+        [InlineKeyboardButton("添加账号", callback_data="login")],
+        [InlineKeyboardButton("添加群组", callback_data="grouplist")],
+        [InlineKeyboardButton("修改广告词", callback_data="prefixmenu")],
         [InlineKeyboardButton("⏱ 发送延迟", callback_data="delaymenu")],
+        [InlineKeyboardButton(" 切换算法", callback_data="algo_menu")],
         [InlineKeyboardButton("▶ 开启", callback_data="start_rep"), InlineKeyboardButton("⏹ 停", callback_data="stop_rep")],
         [InlineKeyboardButton("📊 状态", callback_data="status")],
     ])
@@ -106,25 +180,20 @@ def back_row():
 async def get_alive_client(uid, u):
     global client_instances
     tg = u.setdefault("tg", {})
-
     existing = client_instances.get(uid)
     if existing and existing.is_connected():
         return existing
-
     async with session_lock:
         existing = client_instances.get(uid)
         if existing and existing.is_connected():
             return existing
-
         os.makedirs(SESSION_PATH, exist_ok=True)
         session_file = os.path.join(SESSION_PATH, str(uid))
-
         if existing:
             try:
                 await existing.disconnect()
             except:
                 pass
-
         client = TelegramClient(session_file, API_ID, API_HASH)
         try:
             await asyncio.wait_for(client.connect(), timeout=20)
@@ -134,7 +203,6 @@ async def get_alive_client(uid, u):
         except Exception as e:
             print(f"连接失败:{e}")
             return None
-
         try:
             if await client.is_user_authorized():
                 client_instances[uid] = client
@@ -144,11 +212,9 @@ async def get_alive_client(uid, u):
                 return client
         except Exception:
             pass
-
         phone = tg.get("phone")
         if not phone:
             return client
-
         try:
             if not tg.get("phone_code_hash"):
                 sent = await client.send_code_request(phone)
@@ -198,7 +264,7 @@ async def do_sign_in(update, context, query):
         tg.pop("wait_password", None)
         tg.pop("password_input", None)
         tg["client"] = client
-        await query.edit_message_text(f"✅ 登录成功！\n{me.first_name}\n\n现在发群链接或群ID绑群：", reply_markup=main_menu())
+        await query.edit_message_text(f"✅ 登录成功！\n{me.first_name}\n\n现在发群链接或群ID绑群：", reply_markup=main_menu(u))
     except Exception as e:
         err = str(e)
         if "PASSWORD" in err or "Two-step" in err or "two-step" in err.lower():
@@ -270,6 +336,7 @@ async def run_reporter(uid, context):
                 task = u.get("reporter_task")
                 if not task or task.done(): break
                 delay = u.get("delay", DEFAULT_DELAY)
+                algo_key = u.get("current_algo", DEFAULT_ALGO)
                 records = await fetch_kj_data()
                 if not records:
                     await asyncio.sleep(10)
@@ -314,7 +381,7 @@ async def run_reporter(uid, context):
                     if should_clear:
                         results = []
                         pred_num = p[0] + 1
-                        res = predict(history)
+                        res = predict(history, algo_key)
                         if res is None:
                             await asyncio.sleep(10)
                             continue
@@ -335,7 +402,7 @@ async def run_reporter(uid, context):
                             if opened is None: continue
                             batch_lines.append(build_line(pn, pt, dg, history, opened))
                         pred_num = p[0] + 1
-                        res = predict(history)
+                        res = predict(history, algo_key)
                         if res is None:
                             await asyncio.sleep(10)
                             continue
@@ -373,11 +440,12 @@ async def start(update, context):
     u.setdefault("prefixes", [])
     u.setdefault("current_prefix", "")
     u.setdefault("delay", DEFAULT_DELAY)
+    u.setdefault("current_algo", DEFAULT_ALGO)
     client = await get_alive_client(uid, u)
     if client and u.get("logged_in"):
-        await update.message.reply_text("✅ 已登录，直接操作", reply_markup=main_menu())
+        await update.message.reply_text("✅ 已登录，直接操作", reply_markup=main_menu(u))
     else:
-        await update.message.reply_text("测试公益", reply_markup=main_menu())
+        await update.message.reply_text("开始", reply_markup=main_menu(u))
 
 async def on_message(update, context):
     txt = update.message.text.strip()
@@ -387,11 +455,11 @@ async def on_message(update, context):
         try:
             sec = int(txt)
             if sec < 0:
-                await update.message.reply_text("❌ 不能小于0", reply_markup=main_menu())
+                await update.message.reply_text("❌ 不能小于0", reply_markup=main_menu(u))
             else:
                 u["delay"] = sec
                 u["state"] = "logged_in"
-                await update.message.reply_text(f"✅ 已设置延迟 {sec} 秒", reply_markup=main_menu())
+                await update.message.reply_text(f"✅ 已设置延迟 {sec} 秒", reply_markup=main_menu(u))
         except ValueError:
             await update.message.reply_text("❌ 请输入数字（秒）", reply_markup=back_row())
         return
@@ -408,11 +476,11 @@ async def on_message(update, context):
                 u["state"] = "logged_in"
                 u["tg"].pop("wait_password", None)
                 u["tg"].pop("password_input", None)
-                await update.message.reply_text(f"✅ 两步验证通过！{me.first_name}\n\n现在发群链接绑群", reply_markup=main_menu())
+                await update.message.reply_text(f"✅ 两步验证通过！{me.first_name}\n\n现在发群链接绑群", reply_markup=main_menu(u))
             except Exception as e:
                 await update.message.reply_text(f"❌ 密码错误:{e}\n再发一次：", reply_markup=back_row())
         else:
-            await update.message.reply_text("❌ 客户端丢失", reply_markup=main_menu())
+            await update.message.reply_text("❌ 客户端丢失", reply_markup=main_menu(u))
         return
     if state == "wait_code":
         u["tg"]["code"] = txt
@@ -436,7 +504,7 @@ async def on_message(update, context):
             kb, _ = code_keyboard("")
             await update.message.reply_text("📲 请输入验证码：\n\n　", reply_markup=kb)
         else:
-            await update.message.reply_text("❌ 发码失败，重试", reply_markup=main_menu())
+            await update.message.reply_text("❌ 发码失败，重试", reply_markup=main_menu(u))
             u["state"] = "init"
         return
     if state == "pf_add":
@@ -444,30 +512,30 @@ async def on_message(update, context):
         prefixes.append(txt)
         u["prefixes"] = prefixes
         u["state"] = "logged_in"
-        await update.message.reply_text(f"✅ 已添加前缀:\n{txt}", reply_markup=main_menu())
+        await update.message.reply_text(f"✅ 已添加前缀:\n{txt}", reply_markup=main_menu(u))
         return
     if u.get("logged_in"):
-        if txt in ["开播", "停播"] or txt.startswith("/"):
+        if txt in ["开启", "停"] or txt.startswith("/"):
             pass
         else:
             u.setdefault("target_groups", [])
             try:
                 client = await get_alive_client(update.effective_user.id, u)
                 if not client:
-                    await update.message.reply_text("❌ 客户端异常，重/login", reply_markup=main_menu())
+                    await update.message.reply_text("❌ 客户端异常，重/login", reply_markup=main_menu(u))
                     return
                 ent = await client.get_entity(txt)
                 gid = ent.id
                 if any(g.id == gid for g in u["target_groups"]):
-                    await update.message.reply_text("⚠️ 这个群已经绑过了", reply_markup=main_menu())
+                    await update.message.reply_text("⚠️ 这个群已经绑过了", reply_markup=main_menu(u))
                 else:
                     u["target_groups"].append(ent)
                     name = getattr(ent, 'title', getattr(ent, 'username', str(gid)))
-                    await update.message.reply_text(f"✅ 已绑群：{name}\n当前共 {len(u['target_groups'])} 个群", reply_markup=main_menu())
+                    await update.message.reply_text(f"✅ 已绑群：{name}\n当前共 {len(u['target_groups'])} 个群", reply_markup=main_menu(u))
             except Exception as e:
-                await update.message.reply_text(f"❌ 解析失败:{e}\n\n发群ID或 t.me/链接", reply_markup=main_menu())
+                await update.message.reply_text(f"❌ 解析失败:{e}\n\n发群ID或 t.me/链接", reply_markup=main_menu(u))
             return
-    await update.message.reply_text("请 /start", reply_markup=main_menu())
+    await update.message.reply_text("请 /start", reply_markup=main_menu(u))
 
 async def on_callback(update, context):
     query = update.callback_query
@@ -480,6 +548,7 @@ async def on_callback(update, context):
     u.setdefault("current_prefix", "")
     u.setdefault("target_groups", [])
     u.setdefault("delay", DEFAULT_DELAY)
+    u.setdefault("current_algo", DEFAULT_ALGO)
     tg = u["tg"]
 
     if data == "login":
@@ -491,6 +560,7 @@ async def on_callback(update, context):
         idx = int(data.split("_")[1])
         groups = u.get("target_groups", [])
         if 0 <= idx < len(groups):
+
             removed = groups.pop(idx)
             name = getattr(removed, 'title', getattr(removed, 'username', str(removed.id)))
             await query.answer(f"已删除 {name}")
@@ -524,6 +594,27 @@ async def on_callback(update, context):
         u["delay"] = sec
         await query.answer(f"已设置 {sec} 秒")
         await show_delay_menu(query, u)
+    elif data == "algo_menu":
+        current = u.get("current_algo", DEFAULT_ALGO)
+        name = ALGORITHMS.get(current, ALGORITHMS[DEFAULT_ALGO])["name"]
+        await query.edit_message_text(
+            f"🧮 切换算法\n\n当前：{name}\n点下面切换：",
+            reply_markup=algo_menu(u)
+        )
+    elif data == "algo_set_1":
+        u["current_algo"] = "1"
+        await query.answer("✅ 已切换到 算法一")
+        await query.edit_message_text(
+            f"✅ 已切换到：算法一（原版）\n\n开播后将用此算法预测",
+            reply_markup=algo_menu(u)
+        )
+    elif data == "algo_set_2":
+        u["current_algo"] = "2"
+        await query.answer("✅ 已切换到 算法二")
+        await query.edit_message_text(
+            f"✅ 已切换到：算法二（3Y同组均值+1）\n\n开播后将用此算法预测",
+            reply_markup=algo_menu(u)
+        )
     elif data == "start_rep":
         if not u.get("logged_in"):
             await query.edit_message_text("❌ 先登录", reply_markup=back_row())
@@ -535,7 +626,8 @@ async def on_callback(update, context):
             await query.edit_message_text("运行中", reply_markup=back_row())
             return
         u["reporter_task"] = asyncio.create_task(run_reporter(uid, context))
-        await query.edit_message_text(f"✅ 已启动（延迟 {u.get('delay', DEFAULT_DELAY)}秒）", reply_markup=back_row())
+        algo_name = ALGORITHMS[u.get("current_algo", DEFAULT_ALGO)]["name"]
+        await query.edit_message_text(f"✅ 已启动（延迟 {u.get('delay', DEFAULT_DELAY)}秒，{algo_name}）", reply_markup=back_row())
     elif data == "stop_rep":
         if u.get("reporter_task"):
             u["reporter_task"].cancel()
@@ -545,11 +637,12 @@ async def on_callback(update, context):
         logged = u.get("logged_in", False)
         groups = len(u.get("target_groups", []))
         running = bool(u.get("reporter_task") and not u["reporter_task"].done())
-        text = f"📊 状态\n\n登录：{'✅' if logged else '❌'}\n群：{groups}个\n延迟：{u.get('delay', DEFAULT_DELAY)}秒\n报数：{'🟢' if running else '⭕'}"
+        algo_name = ALGORITHMS[u.get("current_algo", DEFAULT_ALGO)]["name"]
+        text = f"📊 状态\n\n登录：{'✅' if logged else '❌'}\n群：{groups}个\n延迟：{u.get('delay', DEFAULT_DELAY)}秒\n算法：{algo_name}\n报数：{'🟢' if running else '⭕'}"
         await query.edit_message_text(text, reply_markup=back_row())
     elif data == "back":
         u["state"] = "logged_in" if u.get("logged_in") else "init"
-        await query.edit_message_text("菜单", reply_markup=main_menu())
+        await query.edit_message_text("菜单", reply_markup=main_menu(u))
     elif data == "resend":
         try:
             client = await get_alive_client(uid, u)
@@ -567,7 +660,7 @@ async def on_callback(update, context):
             kb, _ = code_keyboard("")
             await query.edit_message_text("🔄 已重发\n📲 请输入验证码：\n\n　", reply_markup=kb)
         except errors.AuthRestartError:
-            await query.edit_message_text("⚠️ 需要重新登录，点【登录TG】", reply_markup=main_menu())
+            await query.edit_message_text("⚠️ 需要重新登录，点【登录】", reply_markup=main_menu(u))
         except Exception as e:
             await query.edit_message_text(f"失败:{e}", reply_markup=back_row())
     elif data == "num_submit":
@@ -588,10 +681,6 @@ async def on_callback(update, context):
         tg["code"] = cur + n
         kb, display = code_keyboard(tg["code"])
         await query.edit_message_text(f"📲 请输入验证码：\n\n{display}", reply_markup=kb)
-
-if not BOT_TOKEN or not API_ID or not API_HASH:
-    print("❌ 请设置环境变量 BOT_TOKEN / API_ID / API_HASH")
-    exit(1)
 
 app = Application.builder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
