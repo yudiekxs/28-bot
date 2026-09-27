@@ -4,19 +4,23 @@ import os
 import random
 import time
 import urllib.request
+import math
+import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telethon import TelegramClient, errors
+from dotenv import load_dotenv
 
-# ========== 从环境变量读取（安全） ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = int(os.getenv("API_ID", 0))
+API_HASH = os.getenv("API_HASH")
 API_URL = "https://pc28.help/api/kj.json?nbr=1"
 
 DEFAULT_DELAY = 5
-DEFAULT_PREFIX = "带着希望"
+DEFAULT_PREFIX = "我带着希望"
 SESSION_PATH = "./sessions"
 
 session_lock = asyncio.Lock()
@@ -26,6 +30,7 @@ client_instances = {}
 ALGORITHMS = {
     "1": {"name": "算法一（原版）"},
     "2": {"name": "算法二（3Y）"},
+    "3": {"name": "算法三（时间π）"},
 }
 DEFAULT_ALGO = "1"
 
@@ -91,7 +96,6 @@ def predict_v2(history):
     elif not big and odd: combo = '小单'
     else:              combo = '小双'
 
-    kill = opposite_combo(combo)
     if combo in ('大单', '大双'):
         group_kill = ['小单', '小双']
     else:
@@ -99,12 +103,56 @@ def predict_v2(history):
 
     return combo, group_kill
 
+# ========== 算法三：时间π ==========
+def predict_v3(history):
+    if not history:
+        return '大双', ['小双', '大单']
+
+    latest = history[-1]
+    a, b, c, open_num = latest[1], latest[2], latest[3], latest[4]
+    if open_num is None:
+        return '大双', ['小双', '大单']
+
+    s = a + b + c
+    if s == 0:
+        s = 1
+
+    time_num = int(datetime.datetime.now().strftime("%H%M"))
+    calc = time_num / s * math.pi
+    calc_str = str(calc).replace('.', '').replace('-', '')
+    digit_sum = sum(int(d) for d in calc_str if d.isdigit())
+
+    while digit_sum > 27:
+        digit_sum = sum(int(d) for d in str(digit_sum))
+
+    result = digit_sum
+    big = result >= 14
+    odd = result % 2 == 1
+
+    if big and odd:      kill = '大单'
+    elif big and not odd: kill = '大双'
+    elif not big and odd: kill = '小单'
+    else:                kill = '小双'
+
+    if kill == '大双':
+        push = ['小双', '大单']
+    elif kill == '大单':
+        push = ['小单', '大双']
+    elif kill == '小双':
+        push = ['大双', '小单']
+    else:
+        push = ['大单', '小双']
+
+    return kill, push
+
 # ========== 统一入口 ==========
 def predict(history, algo_key=None):
     if algo_key is None:
         algo_key = DEFAULT_ALGO
     if algo_key == "2":
         return predict_v2(history)
+    elif algo_key == "3":
+        return predict_v3(history)
     return predict_v1(history)
 
 def build_line(pred_num, pred_type, double_group, history, open_result=None):
@@ -153,12 +201,12 @@ def algo_menu(u):
 
 def main_menu(u):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("添加账号", callback_data="login")],
+        [InlineKeyboardButton("登录账号", callback_data="login")],
         [InlineKeyboardButton("添加群组", callback_data="grouplist")],
         [InlineKeyboardButton("修改广告词", callback_data="prefixmenu")],
         [InlineKeyboardButton("⏱ 发送延迟", callback_data="delaymenu")],
-        [InlineKeyboardButton(" 切换算法", callback_data="algo_menu")],
-        [InlineKeyboardButton("▶ 开启", callback_data="start_rep"), InlineKeyboardButton("⏹ 停", callback_data="stop_rep")],
+        [InlineKeyboardButton("切换算法", callback_data="algo_menu")],
+        [InlineKeyboardButton("开启", callback_data="start_rep"), InlineKeyboardButton("停", callback_data="stop_rep")],
         [InlineKeyboardButton("📊 状态", callback_data="status")],
     ])
 
@@ -304,8 +352,8 @@ async def show_prefix_menu(query, u):
     for i, p in enumerate(prefixes):
         mark = " ✅" if p == current else ""
         kb.append([InlineKeyboardButton(f"{p}{mark}", callback_data=f"pf_set_{i}")])
-    kb.append([InlineKeyboardButton("🎲 随机模式", callback_data="pf_random")])
-    kb.append([InlineKeyboardButton("➕ 添加前缀", callback_data="pf_add")])
+    kb.append([InlineKeyboardButton("🎲 随机广告词", callback_data="pf_random")])
+    kb.append([InlineKeyboardButton("➕ 添加广告词", callback_data="pf_add")])
     kb.append([InlineKeyboardButton("🗑 清空所有", callback_data="pf_clear")])
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
@@ -445,7 +493,7 @@ async def start(update, context):
     if client and u.get("logged_in"):
         await update.message.reply_text("✅ 已登录，直接操作", reply_markup=main_menu(u))
     else:
-        await update.message.reply_text("开始", reply_markup=main_menu(u))
+        await update.message.reply_text("点【登录TG】开始", reply_markup=main_menu(u))
 
 async def on_message(update, context):
     txt = update.message.text.strip()
@@ -553,14 +601,13 @@ async def on_callback(update, context):
 
     if data == "login":
         u["state"] = "wait_phone"
-        await query.edit_message_text("发TG账号：", reply_markup=back_row())
+        await query.edit_message_text("发TG账号)：", reply_markup=back_row())
     elif data == "grouplist":
         await show_group_list(query, u)
     elif data.startswith("delg_"):
         idx = int(data.split("_")[1])
         groups = u.get("target_groups", [])
         if 0 <= idx < len(groups):
-
             removed = groups.pop(idx)
             name = getattr(removed, 'title', getattr(removed, 'username', str(removed.id)))
             await query.answer(f"已删除 {name}")
@@ -615,6 +662,13 @@ async def on_callback(update, context):
             f"✅ 已切换到：算法二（3Y同组均值+1）\n\n开播后将用此算法预测",
             reply_markup=algo_menu(u)
         )
+    elif data == "algo_set_3":
+        u["current_algo"] = "3"
+        await query.answer("✅ 已切换到 算法三")
+        await query.edit_message_text(
+            f"✅ 已切换到：算法三（时间π）\n\n开播后将用此算法预测",
+            reply_markup=algo_menu(u)
+        )
     elif data == "start_rep":
         if not u.get("logged_in"):
             await query.edit_message_text("❌ 先登录", reply_markup=back_row())
@@ -660,7 +714,7 @@ async def on_callback(update, context):
             kb, _ = code_keyboard("")
             await query.edit_message_text("🔄 已重发\n📲 请输入验证码：\n\n　", reply_markup=kb)
         except errors.AuthRestartError:
-            await query.edit_message_text("⚠️ 需要重新登录，点【登录】", reply_markup=main_menu(u))
+            await query.edit_message_text("⚠️ 需要重新登录，点【登录TG】", reply_markup=main_menu(u))
         except Exception as e:
             await query.edit_message_text(f"失败:{e}", reply_markup=back_row())
     elif data == "num_submit":
