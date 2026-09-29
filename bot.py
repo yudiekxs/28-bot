@@ -20,6 +20,23 @@ DEFAULT_DELAY = 5
 DEFAULT_PREFIX = "我带着希望"
 SESSION_PATH = "./sessions"
 
+# ========== 卡密管理 ==========
+VALID_KEYS = {
+    "VIP888888": True,
+    "VIP666666": True,
+    "PC28VIP01": True,
+    "TEST2024": True,
+}
+
+def verify_key(key):
+    """校验卡密，通过则标记为已使用"""
+    k = key.strip().upper()
+    if VALID_KEYS.get(k, False) is True:
+        VALID_KEYS[k] = False
+        return True
+    return False
+# ==============================
+
 # ========== 连中目标配置 ==========
 DEFAULT_STREAK_GOAL = 50   # 默认连中 50 把达成目标
 
@@ -220,7 +237,7 @@ def main_menu(u):
         [InlineKeyboardButton("广告词修改", callback_data="prefixmenu")],
         [InlineKeyboardButton("⏱ 发送延迟", callback_data="delaymenu")],
         [InlineKeyboardButton("切换算法", callback_data="algo_menu")],
-        [InlineKeyboardButton("连中目标", callback_data="streakmenu")],   # 新增
+        [InlineKeyboardButton("连中目标", callback_data="streakmenu")],
         [InlineKeyboardButton("开启", callback_data="start_rep"), InlineKeyboardButton("⏹ 停", callback_data="stop_rep")],
         [InlineKeyboardButton("状态", callback_data="status")],
     ])
@@ -428,19 +445,17 @@ async def run_reporter(uid, context):
                     hit = False
                     if latest_open is not None:
                         combo = get_combination(latest_open)
-                        # 遍历本期预测，只要有一个组合的"杀号"不等于实际组合就算命中
                         for (pn, pt, dg) in list(results):
                             if pn == p[0]:
                                 if combo == pt:
-                                    hit = False   # 杀号中了 = 没命中
+                                    hit = False
                                 else:
-                                    hit = True    # 杀号没中 = 命中
+                                    hit = True
                                 break
                     if hit:
                         streak += 1
                         u["streak"] = streak
                         if streak >= goal:
-                            # 达标，群发提醒
                             client = tg.get("client")
                             if client and groups:
                                 try:
@@ -451,7 +466,7 @@ async def run_reporter(uid, context):
                                         )
                                 except Exception as e:
                                     print(f"连中提醒发送失败:{e}")
-                            u["streak"] = 0   # 达成后归零，重新开始
+                            u["streak"] = 0
                     else:
                         u["streak"] = 0
                     # ==============================
@@ -539,8 +554,19 @@ async def start(update, context):
     u.setdefault("current_prefix", "")
     u.setdefault("delay", DEFAULT_DELAY)
     u.setdefault("current_algo", DEFAULT_ALGO)
-    u.setdefault("streak", 0)                    # 新增
-    u.setdefault("streak_goal", DEFAULT_STREAK_GOAL)  # 新增
+    u.setdefault("streak", 0)
+    u.setdefault("streak_goal", DEFAULT_STREAK_GOAL)
+
+    # ===== 卡密验证（无按钮，纯文字） =====
+    if not u.get("authed"):
+        u["state"] = "wait_key"
+        await update.message.reply_text(
+            "🔑 <b>请输入卡密</b>",
+            parse_mode="HTML"
+        )
+        return
+    # ====================
+
     client = await get_alive_client(uid, u)
     if client and u.get("logged_in"):
         await update.message.reply_text("✅ 已登录，直接操作", reply_markup=main_menu(u))
@@ -551,6 +577,25 @@ async def on_message(update, context):
     txt = update.message.text.strip()
     u = context.user_data
     state = u.get("state", "init")
+
+    # ===== 卡密输入处理（无按钮，纯文字） =====
+    if state == "wait_key":
+        if verify_key(txt):
+            u["authed"] = True
+            u["state"] = "init"
+            await update.message.reply_text(
+                "✅ <b>卡密验证通过！欢迎使用</b>",
+                reply_markup=main_menu(u),
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ <b>卡密无效或已使用</b>\n\n请重新输入：",
+                parse_mode="HTML"
+            )
+        return
+    # =========================
+
     if state == "set_delay":
         try:
             sec = int(txt)
@@ -563,7 +608,7 @@ async def on_message(update, context):
         except ValueError:
             await update.message.reply_text("❌ 请输入数字（秒）", reply_markup=back_row())
         return
-    if state == "streak_custom":   # 新增：自定义连中目标
+    if state == "streak_custom":
         try:
             goal = int(txt)
             if goal < 1:
@@ -662,8 +707,8 @@ async def on_callback(update, context):
     u.setdefault("target_groups", [])
     u.setdefault("delay", DEFAULT_DELAY)
     u.setdefault("current_algo", DEFAULT_ALGO)
-    u.setdefault("streak", 0)                    # 新增
-    u.setdefault("streak_goal", DEFAULT_STREAK_GOAL)  # 新增
+    u.setdefault("streak", 0)
+    u.setdefault("streak_goal", DEFAULT_STREAK_GOAL)
     tg = u["tg"]
 
     if data == "login":
@@ -708,7 +753,6 @@ async def on_callback(update, context):
         u["delay"] = sec
         await query.answer(f"已设置 {sec} 秒")
         await show_delay_menu(query, u)
-    # ========== 连中目标 ==========
     elif data == "streakmenu":
         goal = u.get("streak_goal", DEFAULT_STREAK_GOAL)
         streak = u.get("streak", 0)
@@ -728,7 +772,6 @@ async def on_callback(update, context):
     elif data == "streak_custom":
         u["state"] = "streak_custom"
         await query.edit_message_text("请在聊天框发送一个数字（连中多少把算达成）：", reply_markup=back_row())
-    # ============================
     elif data == "algo_menu":
         current = u.get("current_algo", DEFAULT_ALGO)
         name = ALGORITHMS.get(current, ALGORITHMS[DEFAULT_ALGO])["name"]
