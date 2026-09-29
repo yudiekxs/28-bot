@@ -22,20 +22,40 @@ SESSION_PATH = "./sessions"
 
 # ========== 卡密管理 ==========
 VALID_KEYS = {
-    "TROU87980": True,
-    "Votp77668": True,
-    "PC28VIP01": True,
-    "TEST12024": True,
-    "TESbb2004": True,
+    "X7K9M2P4": True,
+    "Q3R8T1W6": True,
+    "B5N7V9C2": True,
+    "F4J2H8K1": True,
+    "L6D3S9A7": True,
+    "G8Z5X2Q4": True,
+    "E1U7Y3I9": True,
+    "O0P4A6S2": True,
+    "R2D8F5G7": True,
+    "T6Y1U9I3": True,
+    "W3E7R4T8": True,
+    "M9K2L5J7": True,
+    "C4X8V1B6": True,
+    "N7M3B9V2": True,
+    "H5F1G8D4": True,
+    "J2K6L9Q3": True,
+    "A8S4D7F2": True,
+    "Z1X5C9V3": True,
+    "U6I2O7P5": True,
+    "Y4T9R3E6": True,
+    "I1O5P8A2": True,
+    "K7J3H6G9": True,
 }
 
 def verify_key(key):
-    """校验卡密，通过则标记为已使用"""
+    """校验卡密，返回: 'ok'=有效可用, 'used'=已被使用, 'invalid'=无效卡密"""
     k = key.strip().upper()
-    if VALID_KEYS.get(k, False) is True:
-        VALID_KEYS[k] = False
-        return True
-    return False
+    status = VALID_KEYS.get(k)
+    if status is None:
+        return 'invalid'
+    if status is False:
+        return 'used'
+    VALID_KEYS[k] = False
+    return 'ok'
 # ==============================
 
 # ========== 连中目标配置 ==========
@@ -578,7 +598,8 @@ async def on_message(update, context):
 
     # ===== 卡密输入处理（无按钮，纯文字） =====
     if state == "wait_key":
-        if verify_key(txt):
+        result = verify_key(txt)
+        if result == 'ok':
             u["authed"] = True
             u["state"] = "init"
             await update.message.reply_text(
@@ -586,9 +607,14 @@ async def on_message(update, context):
                 reply_markup=main_menu(u),
                 parse_mode="HTML"
             )
+        elif result == 'used':
+            await update.message.reply_text(
+                "⚠️ <b>此卡密已被使用</b>\n\n请重新输入：",
+                parse_mode="HTML"
+            )
         else:
             await update.message.reply_text(
-                "❌ <b>卡密无效或已使用</b>\n\n请重新输入：",
+                "❌ <b>无效卡密</b>\n\n请重新输入：",
                 parse_mode="HTML"
             )
         return
