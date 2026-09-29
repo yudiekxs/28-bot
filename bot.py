@@ -22,10 +22,11 @@ SESSION_PATH = "./sessions"
 
 # ========== 卡密管理 ==========
 VALID_KEYS = {
-    "VIP888888": True,
-    "VIP666666": True,
+    "TROU87980": True,
+    "Votp77668": True,
     "PC28VIP01": True,
-    "TEST2024": True,
+    "TEST12024": True,
+    "TESbb2004": True,
 }
 
 def verify_key(key):
