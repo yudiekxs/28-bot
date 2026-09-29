@@ -38,7 +38,7 @@ def verify_key(key):
 # ==============================
 
 # ========== 连中目标配置 ==========
-DEFAULT_STREAK_GOAL = 50   # 默认连中 50 把达成目标
+DEFAULT_STREAK_GOAL = 50
 
 session_lock = asyncio.Lock()
 client_instances = {}
@@ -206,7 +206,6 @@ def parse_api_record(item):
         return (num, a, b, c, open_num)
     except: return None
 
-# ========== 算法菜单 ==========
 def algo_menu(u):
     current = u.get("current_algo", DEFAULT_ALGO)
     kb = []
@@ -216,7 +215,6 @@ def algo_menu(u):
     kb.append([InlineKeyboardButton("🔙 返回", callback_data="back")])
     return InlineKeyboardMarkup(kb)
 
-# ========== 连中目标菜单 ==========
 def streak_menu(u):
     goal = u.get("streak_goal", DEFAULT_STREAK_GOAL)
     streak = u.get("streak", 0)
@@ -438,7 +436,6 @@ async def run_reporter(uid, context):
                     history.append(p)
                     if len(history) > 30: history = history[-30:]
 
-                    # ========== 连中判定 ==========
                     latest_open = p[4]
                     goal = u.get("streak_goal", DEFAULT_STREAK_GOAL)
                     streak = u.get("streak", 0)
@@ -469,7 +466,6 @@ async def run_reporter(uid, context):
                             u["streak"] = 0
                     else:
                         u["streak"] = 0
-                    # ==============================
 
                     should_clear = False
                     if latest_open is not None:
@@ -557,12 +553,13 @@ async def start(update, context):
     u.setdefault("streak", 0)
     u.setdefault("streak_goal", DEFAULT_STREAK_GOAL)
 
-    # ===== 卡密验证（无按钮，纯文字） =====
+    # ===== 卡密验证（没过之前啥按钮都不给） =====
     if not u.get("authed"):
         u["state"] = "wait_key"
         await update.message.reply_text(
             "🔑 <b>请输入卡密</b>",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=None
         )
         return
     # ====================
@@ -701,6 +698,13 @@ async def on_callback(update, context):
     data = query.data
     uid = update.effective_user.id
     u = context.user_data
+
+    # ===== 卡密没过，所有按钮回调一律拦截 =====
+    if not u.get("authed"):
+        await query.answer("🔑 请先输入卡密", show_alert=True)
+        return
+    # ====================
+
     u.setdefault("tg", {})
     u.setdefault("prefixes", [])
     u.setdefault("current_prefix", "")
